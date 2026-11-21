@@ -28,6 +28,13 @@ struct MIDIActivity: Identifiable {
     let detail: String
 }
 
+struct MIDILearnedInput: Sendable {
+    let deviceID: String
+    let type: MIDIRouting.MIDIMessageType
+    let channel: Int
+    let number: Int?
+}
+
 final class MIDITransport: @unchecked Sendable {
     static let outputName = "MIDI Reconfigure"
     private static let savedOutputID = "VirtualOutputUniqueID"
@@ -37,6 +44,11 @@ final class MIDITransport: @unchecked Sendable {
     private struct Source {
         let endpoint: MIDIEndpointRef
         let input: MIDIInputSource
+    }
+
+    private struct LearnRequest {
+        let id: UUID
+        let onLearn: (UUID, MIDILearnedInput) -> Void
     }
 
     private struct EventPacket {
@@ -85,6 +97,7 @@ final class MIDITransport: @unchecked Sendable {
     private var sources: [MIDIInputSource] = []
     private var connections: [Int: Source] = [:]
     private var connectionToken = 0
+    private var learnRequest: LearnRequest?
     private var monitorBatch: [MIDIActivity] = []
     private var monitorDeliveryScheduled = false
     private var lastError: (code: String, message: String, time: Date)?
@@ -134,6 +147,16 @@ final class MIDITransport: @unchecked Sendable {
             self.isPaused = isPaused
             if selectionChanged { self.updateSources() }
         }
+    }
+
+    func armLearn(_ requestID: UUID, onLearn: @escaping (UUID, MIDILearnedInput) -> Void) {
+        queue.async { [weak self] in
+            self?.learnRequest = LearnRequest(id: requestID, onLearn: onLearn)
+        }
+    }
+
+    func cancelLearn() {
+        queue.async { [weak self] in self?.learnRequest = nil }
     }
 
     func refreshSources() {
@@ -218,6 +241,7 @@ final class MIDITransport: @unchecked Sendable {
     }
 
     private func resetPorts() {
+        learnRequest = nil
         releaseConnectedNotes()
         connections.removeAll()
         disposePortsAndSource()
@@ -329,6 +353,7 @@ final class MIDITransport: @unchecked Sendable {
                 let wordCount = Self.umpWordCounts[type]
                 let next = index + wordCount
                 guard next <= packet.words.count else { break }
+                if let message { learn(from: message, deviceID: source.id) }
                 let messageWords = packet.words[index..<next]
                 let incoming = activityRow(for: message, words: messageWords, from: source, direction: .incoming, time: received)
                 activity.append(incoming)
@@ -357,6 +382,24 @@ final class MIDITransport: @unchecked Sendable {
             }
             record(activity)
         }
+    }
+
+    private func learn(from message: MIDIMessage, deviceID: String) {
+        guard let request = learnRequest else { return }
+        switch message.type {
+        case .note:
+            guard !message.isNoteRelease else { return }
+        case .controlChange, .programChange:
+            break
+        default:
+            return
+        }
+
+        learnRequest = nil
+        let input = MIDILearnedInput(
+            deviceID: deviceID, type: message.type, channel: message.channel, number: message.number
+        )
+        DispatchQueue.main.async { request.onLearn(request.id, input) }
     }
 
     // UMP size is defined by the leading message-type nibble, including reserved types.

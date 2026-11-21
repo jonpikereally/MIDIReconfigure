@@ -270,12 +270,11 @@ private struct RoutingView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .sheet(item: $ruleToEdit) { rule in
+        .sheet(item: $ruleToEdit, onDismiss: { model.cancelLearning() }) { rule in
             RuleEditor(
                 rule: rule,
                 isNew: !model.rules.contains { $0.id == rule.id },
-                sources: model.sources,
-                onSave: model.saveRule
+                model: model
             )
             .tint(brandTint)
         }
@@ -431,35 +430,42 @@ private struct RoutingView: View {
 
 private struct RuleEditor: View {
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: AppModel
     @State private var draft: MIDIRule
     @State private var inputNumber: String
     @State private var outputNumber: String
     let isNew: Bool
-    let sources: [MIDIInputSource]
-    let onSave: (MIDIRule) -> Void
 
-    init(rule: MIDIRule, isNew: Bool, sources: [MIDIInputSource], onSave: @escaping (MIDIRule) -> Void) {
+    init(rule: MIDIRule, isNew: Bool, model: AppModel) {
+        self.model = model
         _draft = State(initialValue: rule)
         _inputNumber = State(initialValue: rule.inputNumber.map(String.init) ?? "")
         _outputNumber = State(initialValue: rule.outputNumber.map(String.init) ?? "")
         self.isNew = isNew
-        self.sources = sources
-        self.onSave = onSave
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(isNew ? "Add routing rule" : "Edit routing rule")
-                .font(.title2.weight(.semibold))
+            HStack(spacing: 12) {
+                Text(isNew ? "Add routing rule" : "Edit routing rule")
+                    .font(.title2.weight(.semibold))
+                Spacer()
+                learnButton
+            }
+            if model.isLearning {
+                Label("Play a note, turn a MIDI control, or send a Program Change.", systemImage: "waveform")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
             Grid(alignment: .topLeading, horizontalSpacing: 12, verticalSpacing: 10) {
                 GridRow {
                     formLabel("Match")
                     Picker("Input", selection: $draft.deviceID) {
                         Text("Any input").tag(nil as String?)
-                        if let deviceID = draft.deviceID, !sources.contains(where: { $0.id == deviceID }) {
+                        if let deviceID = draft.deviceID, !model.sources.contains(where: { $0.id == deviceID }) {
                             Text("Saved input (offline)").tag(Optional(deviceID))
                         }
-                        ForEach(sources) { source in
+                        ForEach(model.sources) { source in
                             Text(source.name).tag(Optional(source.id))
                         }
                     }
@@ -471,7 +477,7 @@ private struct RuleEditor: View {
                 }
                 GridRow {
                     formLabel("Message type")
-                    Picker("Message type", selection: $draft.type) {
+                    Picker("Message type", selection: Binding(get: { draft.type }, set: setMessageType)) {
                         ForEach(MIDIMessageType.allCases) { type in
                             Text(type.title).tag(type)
                         }
@@ -528,23 +534,67 @@ private struct RuleEditor: View {
 
             HStack {
                 Spacer()
-                Button("Cancel", role: .cancel) { dismiss() }
-                    .keyboardShortcut(.cancelAction)
+                Button("Cancel", role: .cancel) {
+                    model.cancelLearning()
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
                 Button("Save rule") { save() }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
-                    .disabled(validationMessage != nil)
+                    .disabled(model.isLearning || validationMessage != nil)
             }
         }
         .padding(22)
         .frame(width: 434)
-        .onChange(of: draft.type) { _, newType in
-            if !newType.supportsNumber {
-                inputNumber = ""
-                outputNumber = ""
+    }
+
+    private var learnButton: some View {
+        HStack(spacing: 0) {
+            Button {
+                if model.isLearning {
+                    model.cancelLearning()
+                } else {
+                    model.beginLearning(onLearn: applyLearnedInput)
+                }
+            } label: {
+                Label(
+                    model.isLearning ? "Cancel Learn" : "MIDI Learn",
+                    systemImage: model.isLearning ? "xmark.circle" : "dot.radiowaves.left.and.right"
+                )
             }
-            if newType != .controlChange { draft.invertCC = false }
+            .disabled(!model.isLearning && !model.canLearn)
         }
+        .contentShape(Rectangle())
+        .help(learningHelp)
+    }
+
+    private var learningHelp: String {
+        if model.isLearning { return "Stop listening for MIDI." }
+        if !model.outputReady { return "Wait for Core MIDI to connect before using MIDI Learn." }
+        if model.canLearn { return "Fill the match fields from the next MIDI message." }
+        return "Enable a connected MIDI input in Routing to use MIDI Learn."
+    }
+
+    private func setMessageType(_ type: MIDIMessageType) {
+        guard draft.type != type else { return }
+        if !type.supportsNumber {
+            inputNumber = ""
+            outputNumber = ""
+        }
+        if type != .controlChange { draft.invertCC = false }
+        draft.type = type
+    }
+
+    private func applyLearnedInput(_ input: MIDILearnedInput) {
+        let noteTypes: [MIDIMessageType] = [.note, .polyphonicPressure]
+        if draft.type != input.type, !(noteTypes.contains(draft.type) && noteTypes.contains(input.type)) {
+            outputNumber = ""
+        }
+        setMessageType(input.type)
+        draft.deviceID = input.deviceID
+        draft.inputChannel = input.channel
+        inputNumber = input.number.map(String.init) ?? ""
     }
 
     private var validationMessage: String? {
@@ -594,7 +644,7 @@ private struct RuleEditor: View {
             draft.outputChannel = nil
             draft.invertCC = false
         }
-        onSave(draft)
+        model.saveRule(draft)
         dismiss()
     }
 }

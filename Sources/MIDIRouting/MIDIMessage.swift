@@ -90,7 +90,7 @@ public struct MIDIMessage: Equatable, Sendable {
         }
     }
 
-    var isNoteRelease: Bool { status == .noteOff || (status == .noteOn && secondDataByte == 0) }
+    public var isNoteRelease: Bool { status == .noteOff || (status == .noteOn && secondDataByte == 0) }
 
     var silencesChannelNotes: Bool {
         status == .controlChange && secondDataByte == 0 && (firstDataByte == 120 || firstDataByte == 123)

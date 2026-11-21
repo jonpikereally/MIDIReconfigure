@@ -32,6 +32,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var activity: [MIDIActivity] = []
     @Published private(set) var errors: [MIDITransportError] = []
     @Published private(set) var outputReady = false
+    @Published private var learningRequestID: UUID?
     @Published var isMonitorPaused = false
     @Published var workspaceSection: WorkspaceSection = .routing
 
@@ -41,6 +42,12 @@ final class AppModel: ObservableObject {
 
     @Published var isPaused = false {
         didSet { if oldValue != isPaused { settingsDidChange() } }
+    }
+
+    var isLearning: Bool { learningRequestID != nil }
+
+    var canLearn: Bool {
+        outputReady && sources.contains { enabledSourceIDs.contains($0.id) }
     }
 
     private let defaults: UserDefaults
@@ -77,10 +84,12 @@ final class AppModel: ObservableObject {
     }
 
     func stop() {
+        cancelLearning()
         transport.stop()
     }
 
     func retryMIDI() {
+        cancelLearning()
         outputReady = false
         transport.restart()
     }
@@ -96,6 +105,23 @@ final class AppModel: ObservableObject {
             guard enabledSourceIDs.remove(id) != nil else { return }
         }
         settingsDidChange()
+    }
+
+    func beginLearning(onLearn: @escaping (MIDILearnedInput) -> Void) {
+        guard canLearn, learningRequestID == nil else { return }
+        let requestID = UUID()
+        learningRequestID = requestID
+        transport.armLearn(requestID) { [weak self] completedID, input in
+            guard let self, self.learningRequestID == completedID else { return }
+            self.learningRequestID = nil
+            onLearn(input)
+        }
+    }
+
+    func cancelLearning() {
+        guard learningRequestID != nil else { return }
+        learningRequestID = nil
+        transport.cancelLearn()
     }
 
     func saveRule(_ rule: MIDIRule) {

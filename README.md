@@ -9,6 +9,8 @@ MIDI Reconfigure is a macOS menu bar utility that remaps incoming MIDI and publi
 3. Set a **Default output channel** or add a rule. Rules run from top to bottom and the first enabled match applies. A rule can match an input port, channel, message type, and where applicable, the note, CC, or program number.
 4. Select **MIDI Reconfigure** as a MIDI input in your DAW. Select that input on your track if your DAW also listens to the original device.
 
+In the rule editor, click **MIDI Learn** and play a note, move a control, or send a Program Change from an enabled input. The editor fills in the device, channel, type, and number from that message. Set the action and save the rule when ready. MIDI Learn also works while routing is paused.
+
 Examples
 
 | Match | Action |
