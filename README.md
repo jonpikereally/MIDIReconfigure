@@ -14,12 +14,18 @@ MIDI Reconfigure checks this repository's GitHub Releases at launch and every fe
 
 Turn on **Install updates automatically** to install a new version when the app launches. Updates never install while the app is already running, so a set is never interrupted. Keep the app in a folder you can write to, such as Applications.
 
-To publish a release, push a version tag. The Release workflow tests the code, builds a universal app, and attaches `MIDI-Reconfigure.zip` to a new GitHub release:
+To publish a release from the browser:
 
-```sh
-git tag v1.3.0
-git push origin v1.3.0
-```
+1. Open the repository's **Actions** tab and choose **Release**.
+2. Click **Run workflow**. Leave **Version** empty to use the version in `Packaging/Info.plist`, or enter one such as `1.3.1`.
+3. Click the green **Run workflow** button.
+
+The workflow tests the code, builds a universal app, creates the `v<version>` tag, and attaches `MIDI-Reconfigure.zip` to a new GitHub release. Pushing a `v*` tag from Terminal does the same thing.
+
+| Code | What to check |
+| --- | --- |
+| `REL-001` | The version must look like `1.3.0`. |
+| `REL-002` | That version is already released. Bump `CFBundleShortVersionString` in `Packaging/Info.plist`, or enter a new version. |
 
 ## Route MIDI to your DAW
 
