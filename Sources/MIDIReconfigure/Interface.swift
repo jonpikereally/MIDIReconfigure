@@ -4,19 +4,21 @@ import SwiftUI
 
 enum WorkspaceSection: String, CaseIterable {
     case routing = "Routing"
+    case functions = "Functions"
     case activity = "Activity"
     case errors = "Errors"
 
     var icon: String {
         switch self {
         case .routing: "arrow.triangle.branch"
+        case .functions: "bolt.circle"
         case .activity: "waveform"
         case .errors: "exclamationmark.circle"
         }
     }
 }
 
-private let brandTint = Color(nsColor: NSColor(name: nil) { appearance in
+let brandTint = Color(nsColor: NSColor(name: nil) { appearance in
     if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
         return NSColor(red: 0.65, green: 0.59, blue: 1, alpha: 1)
     }
@@ -87,6 +89,7 @@ struct MenuBarPanel: View {
                 }
                 Spacer(minLength: 0)
                 Menu {
+                    Button("Function library…") { openWorkspace(.functions) }
                     Button("Errors…") { openWorkspace(.errors) }
                     Divider()
                     Button("Quit MIDI Reconfigure") { NSApp.terminate(nil) }
@@ -116,8 +119,11 @@ struct MenuBarPanel: View {
     }
 
     private var ruleCount: String {
-        let count = model.rules.filter(\.isEnabled).count
-        return count == 1 ? "1 rule active" : "\(count) rules active"
+        let rules = model.rules.filter(\.isEnabled).count
+        let functions = model.functionMappings.filter { $0.isEnabled && $0.trigger != nil }.count
+        let ruleText = rules == 1 ? "1 rule" : "\(rules) rules"
+        let functionText = functions == 1 ? "1 function" : "\(functions) functions"
+        return "\(ruleText) · \(functionText)"
     }
 }
 
@@ -132,6 +138,7 @@ struct WorkspaceView: View {
 
             switch selection {
             case .routing: RoutingView(model: model)
+            case .functions: FunctionsView(model: model)
             case .activity: ActivityView(model: model)
             case .errors: ErrorsView(model: model)
             }
@@ -156,7 +163,7 @@ struct WorkspaceView: View {
             }
             .labelsHidden()
             .pickerStyle(.segmented)
-            .frame(width: 258)
+            .frame(width: 344)
 
             Spacer(minLength: 12)
             OutputStatus(model: model)
@@ -220,9 +227,23 @@ private struct OutputStatus: View {
     }
 }
 
+private enum RoutingSheet: Identifiable {
+    case rule(MIDIRule)
+    case mapping(MIDIFunctionMapping, learn: Bool)
+    case function(MIDIOutputFunction)
+
+    var id: String {
+        switch self {
+        case let .rule(rule): "rule-\(rule.id)"
+        case let .mapping(mapping, _): "mapping-\(mapping.id)"
+        case let .function(function): "function-\(function.id)"
+        }
+    }
+}
+
 private struct RoutingView: View {
     @ObservedObject var model: AppModel
-    @State private var ruleToEdit: MIDIRule?
+    @State private var sheet: RoutingSheet?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -231,52 +252,194 @@ private struct RoutingView: View {
                 .frame(maxHeight: .infinity)
                 .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
             Divider()
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(alignment: .center) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Rules").font(.title2.weight(.semibold))
-                        Text("The first enabled rule that matches takes priority.")
-                            .foregroundStyle(.secondary)
-                            .font(.callout)
-                    }
-                    Spacer()
-                    Button {
-                        ruleToEdit = MIDIRule()
-                    } label: {
-                        Label("Add rule", systemImage: "plus")
-                    }
-                    .buttonStyle(.borderedProminent)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    functionsSection
+                    Divider().padding(.horizontal, 20).padding(.vertical, 6)
+                    rulesSection
                 }
-                .padding(20)
-
-                if model.rules.isEmpty {
-                    EmptyPanel(
-                        symbol: WorkspaceSection.routing.icon,
-                        title: "No routing rules yet",
-                        detail: "Add a rule to remap a note, change channels, or reverse a CC control."
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    ScrollView {
-                        LazyVStack(spacing: 7) {
-                            ForEach(Array(model.rules.enumerated()), id: \.element.id) { index, rule in
-                                ruleRow(rule, index: index)
-                            }
-                        }
-                        .padding(.horizontal, 20)
-                        .padding(.bottom, 20)
-                    }
-                }
+                .padding(.bottom, 20)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .sheet(item: $ruleToEdit, onDismiss: { model.cancelLearning() }) { rule in
-            RuleEditor(
-                rule: rule,
-                isNew: !model.rules.contains { $0.id == rule.id },
-                model: model
-            )
+        .sheet(item: $sheet, onDismiss: { model.cancelLearning() }) { sheet in
+            Group {
+                switch sheet {
+                case let .rule(rule):
+                    RuleEditor(rule: rule, isNew: !model.rules.contains { $0.id == rule.id }, model: model)
+                case let .mapping(mapping, learn):
+                    MappingEditor(mapping: mapping, startLearning: learn, model: model)
+                case let .function(function):
+                    FunctionEditor(function: function, isNew: false, model: model)
+                }
+            }
             .tint(brandTint)
+        }
+    }
+
+    private var functionsSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Functions").font(.title2.weight(.semibold))
+                    Text("Mapped inputs send a saved function and skip the rules below.")
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                }
+                Spacer()
+                LoadFunctionMenu(model: model) { functionID in
+                    sheet = .mapping(model.loadFunction(functionID), learn: true)
+                }
+            }
+            .padding(20)
+
+            if model.functionMappings.isEmpty {
+                Text("Load a function from the library, such as AbleSet Play or the Quad Cortex tuner, then map a button or pedal to it.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 14)
+            } else {
+                LazyVStack(spacing: 7) {
+                    ForEach(Array(model.functionMappings.enumerated()), id: \.element.id) { index, mapping in
+                        mappingRow(mapping, index: index)
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 14)
+            }
+        }
+    }
+
+    private var rulesSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Rules").font(.title2.weight(.semibold))
+                    Text("The first enabled rule that matches takes priority.")
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                }
+                Spacer()
+                Button {
+                    sheet = .rule(MIDIRule())
+                } label: {
+                    Label("Add rule", systemImage: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(20)
+
+            if model.rules.isEmpty {
+                EmptyPanel(
+                    symbol: WorkspaceSection.routing.icon,
+                    title: "No routing rules yet",
+                    detail: "Add a rule to remap a note, change channels, or reverse a CC control."
+                )
+                .frame(maxWidth: .infinity)
+            } else {
+                LazyVStack(spacing: 7) {
+                    ForEach(Array(model.rules.enumerated()), id: \.element.id) { index, rule in
+                        ruleRow(rule, index: index)
+                    }
+                }
+                .padding(.horizontal, 20)
+            }
+        }
+    }
+
+    private func mappingRow(_ mapping: MIDIFunctionMapping, index: Int) -> some View {
+        let function = model.function(id: mapping.functionID)
+        return HStack(spacing: 12) {
+            Toggle(
+                "Enable function",
+                isOn: Binding(
+                    get: { mapping.isEnabled },
+                    set: { model.setMappingEnabled(mapping.id, enabled: $0) }
+                )
+            )
+            .labelsHidden()
+            .toggleStyle(.checkbox)
+            .help(mapping.isEnabled ? "Disable function" : "Enable function")
+            .disabled(function == nil)
+
+            Button {
+                if function != nil { sheet = .mapping(mapping, learn: false) }
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    if let function {
+                        HStack(spacing: 6) {
+                            Text(function.name)
+                                .font(.callout.weight(.semibold))
+                                .lineLimit(1)
+                            if function.needsVerification { VerifyBadge() }
+                        }
+                        Text("\(triggerSummary(mapping.trigger, model: model)) → \(outputSummary(function.output)) · \(model.destinationName(for: function))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                        if mapping.trigger == nil {
+                            Text("Not mapped yet. Click to map an input.")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(brandTint)
+                        }
+                        if model.isDestinationOffline(function) {
+                            ErrorText(code: "MIDI-108", message: "Destination offline")
+                        }
+                    } else {
+                        ErrorText(code: "FUNC-003", message: "This function is no longer in the library.")
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(function == nil ? AppModel.errorHelp : "Map input")
+
+            if let function {
+                Button {
+                    model.testFunction(function)
+                } label: {
+                    Image(systemName: "play.circle")
+                        .accessibilityLabel("Send \(function.name) now")
+                }
+                .buttonStyle(.borderless)
+                .disabled(!model.outputReady)
+                .help("Send this function’s output now")
+            }
+
+            Menu {
+                if let function {
+                    Button("Map input…") { sheet = .mapping(mapping, learn: false) }
+                    Button("Map with MIDI Learn") { sheet = .mapping(mapping, learn: true) }
+                        .disabled(!model.canLearn)
+                    Button("Edit function output…") { sheet = .function(function) }
+                    Divider()
+                }
+                Button("Move up") { model.moveMapping(mapping.id, by: -1) }
+                    .disabled(index == 0)
+                Button("Move down") { model.moveMapping(mapping.id, by: 1) }
+                    .disabled(index == model.functionMappings.count - 1)
+                Divider()
+                Button("Remove from routing", role: .destructive) { model.deleteMapping(mapping.id) }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .accessibilityLabel("Function actions")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+        }
+        .padding(12)
+        .background {
+            RoundedRectangle(cornerRadius: 9)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 9)
+                .strokeBorder(brandTint.opacity(0.35))
+                .allowsHitTesting(false)
         }
     }
 
@@ -362,7 +525,7 @@ private struct RoutingView: View {
             .help(rule.isEnabled ? "Disable rule" : "Enable rule")
 
             Button {
-                ruleToEdit = rule
+                sheet = .rule(rule)
             } label: {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(ruleTitle(rule))
@@ -380,7 +543,7 @@ private struct RoutingView: View {
             .help("Edit rule")
 
             Menu {
-                Button("Edit…") { ruleToEdit = rule }
+                Button("Edit…") { sheet = .rule(rule) }
                 Divider()
                 Button("Move up") { model.moveRule(rule.id, by: -1) }
                     .disabled(index == 0)
@@ -874,7 +1037,7 @@ private struct ErrorsView: View {
     }
 }
 
-private struct EmptyPanel: View {
+struct EmptyPanel: View {
     let symbol: String
     let title: String
     let detail: String

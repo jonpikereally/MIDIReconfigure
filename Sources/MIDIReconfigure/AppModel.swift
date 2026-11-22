@@ -13,9 +13,17 @@ final class AppModel: ObservableObject {
         ("MIDI-104", "The selected input could not be connected. Reconnect the device and click Refresh Inputs."),
         ("MIDI-105", "An event could not be sent to the virtual output. Try Restart MIDI and reselect the port in your DAW."),
         ("MIDI-106", "The virtual output's persistent identity could not be assigned. If your DAW lost its selection, reselect MIDI Reconfigure."),
+        ("MIDI-107", "The hardware MIDI output port could not be created, so functions can only use the virtual port. Try Restart MIDI."),
+        ("MIDI-108", "A function’s hardware destination is offline. Reconnect the device, or edit the function and choose another destination."),
+        ("MIDI-109", "A message could not be sent to a hardware destination. Reconnect the device and try Restart MIDI."),
         ("MIDI-201", "Saved routing settings could not be read. The app loaded defaults. Changing a routing setting saves a new configuration."),
         ("MIDI-202", "Changes could not be saved. Try again before quitting the app."),
-        ("RULE-001", "A rule’s input or output number must be a whole number from 0 to 127.")
+        ("MIDI-203", "The function library could not be read. The starter library was loaded and the unreadable copy was kept as a backup."),
+        ("MIDI-204", "Function library changes could not be saved. Try again before quitting the app."),
+        ("RULE-001", "A rule’s input or output number must be a whole number from 0 to 127."),
+        ("FUNC-001", "A function’s number must be 0–127, its value 0–127 (velocity 1–127), and its channel 1–16."),
+        ("FUNC-002", "A function mapping’s input number must be a whole number from 0 to 127."),
+        ("FUNC-003", "A loaded function is no longer in the library. Remove it from Routing or load it again from the library.")
     ]
 
     static var buildDescription: String {
@@ -29,6 +37,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var sources: [MIDIInputSource] = []
     @Published private(set) var enabledSourceIDs: Set<String> = []
     @Published private(set) var rules: [MIDIRule] = []
+    @Published private(set) var functions: [MIDIOutputFunction] = []
+    @Published private(set) var functionMappings: [MIDIFunctionMapping] = []
+    @Published private(set) var destinations: [MIDIOutputDestination] = []
     @Published private(set) var activity: [MIDIActivity] = []
     @Published private(set) var errors: [MIDITransportError] = []
     @Published private(set) var outputReady = false
@@ -52,12 +63,14 @@ final class AppModel: ObservableObject {
 
     private let defaults: UserDefaults
     private let settingsKey = "routing-settings-v1"
+    private let libraryKey = "function-library-v1"
     private let activityLimit = 600
     private var isLoading = true
 
     private lazy var transport = MIDITransport(
         defaults: defaults,
         onSources: { [weak self] in self?.sources = $0 },
+        onDestinations: { [weak self] in self?.destinations = $0 },
         onActivity: { [weak self] in self?.receiveActivity($0) },
         onStatus: { [weak self] in self?.outputReady = $0 },
         onError: { [weak self] in self?.recordError($0) }
@@ -66,6 +79,7 @@ final class AppModel: ObservableObject {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         defer { isLoading = false }
+        loadLibrary()
         guard let data = defaults.data(forKey: settingsKey) else { return }
         do {
             let settings = try JSONDecoder().decode(Settings.self, from: data)
@@ -73,6 +87,7 @@ final class AppModel: ObservableObject {
             defaultOutputChannel = settings.defaultOutputChannel
             isPaused = settings.isPaused
             rules = settings.rules
+            functionMappings = settings.functionMappings ?? []
         } catch {
             recordError(MIDITransportError(code: "MIDI-201", message: "Could not read saved routing settings. Using defaults."))
         }
@@ -153,6 +168,114 @@ final class AppModel: ObservableObject {
         settingsDidChange()
     }
 
+    // MARK: Function library
+
+    func function(id: UUID) -> MIDIOutputFunction? {
+        functions.first { $0.id == id }
+    }
+
+    func mappingCount(for functionID: UUID) -> Int {
+        functionMappings.filter { $0.functionID == functionID }.count
+    }
+
+    func destinationName(for function: MIDIOutputFunction) -> String {
+        guard let id = function.destinationID else { return Self.outputName }
+        return destinations.first(where: { $0.id == id })?.name ?? "\(function.destinationName ?? "Saved destination") (offline)"
+    }
+
+    func isDestinationOffline(_ function: MIDIOutputFunction) -> Bool {
+        guard let id = function.destinationID else { return false }
+        return !destinations.contains { $0.id == id }
+    }
+
+    func saveFunction(_ function: MIDIOutputFunction) {
+        var function = function
+        if let id = function.destinationID, let destination = destinations.first(where: { $0.id == id }) {
+            function.destinationName = destination.name
+        } else if function.destinationID == nil {
+            function.destinationName = nil
+        }
+        if let index = functions.firstIndex(where: { $0.id == function.id }) {
+            functions[index] = function
+        } else {
+            functions.append(function)
+        }
+        libraryDidChange()
+    }
+
+    func duplicateFunction(_ id: UUID) {
+        guard var copy = function(id: id) else { return }
+        copy.id = UUID()
+        copy.name += " copy"
+        functions.append(copy)
+        libraryDidChange()
+    }
+
+    /// Removes a function from the library and from the routing configuration.
+    func deleteFunction(_ id: UUID) {
+        functions.removeAll { $0.id == id }
+        libraryDidChange()
+        let before = functionMappings.count
+        functionMappings.removeAll { $0.functionID == id }
+        if functionMappings.count != before { settingsDidChange() }
+    }
+
+    func restoreStarterFunctions() {
+        let names = Set(functions.map(\.name))
+        let missing = MIDIOutputFunction.starterLibrary.filter { !names.contains($0.name) }.map { starter in
+            var copy = starter
+            copy.id = UUID()
+            return copy
+        }
+        guard !missing.isEmpty else { return }
+        functions += missing
+        libraryDidChange()
+    }
+
+    func testFunction(_ function: MIDIOutputFunction) {
+        transport.sendTest(function)
+    }
+
+    // MARK: Loaded functions
+
+    /// Adds a library function to the routing configuration and returns the new, unmapped entry.
+    @discardableResult
+    func loadFunction(_ functionID: UUID) -> MIDIFunctionMapping {
+        let mapping = MIDIFunctionMapping(functionID: functionID)
+        functionMappings.append(mapping)
+        settingsDidChange()
+        return mapping
+    }
+
+    func saveMapping(_ mapping: MIDIFunctionMapping) {
+        if let index = functionMappings.firstIndex(where: { $0.id == mapping.id }) {
+            functionMappings[index] = mapping
+        } else {
+            functionMappings.append(mapping)
+        }
+        settingsDidChange()
+    }
+
+    func deleteMapping(_ id: UUID) {
+        guard let index = functionMappings.firstIndex(where: { $0.id == id }) else { return }
+        functionMappings.remove(at: index)
+        settingsDidChange()
+    }
+
+    func moveMapping(_ id: UUID, by offset: Int) {
+        guard let index = functionMappings.firstIndex(where: { $0.id == id }),
+              functionMappings.indices.contains(index + offset) else { return }
+        let mapping = functionMappings.remove(at: index)
+        functionMappings.insert(mapping, at: index + offset)
+        settingsDidChange()
+    }
+
+    func setMappingEnabled(_ id: UUID, enabled: Bool) {
+        guard let index = functionMappings.firstIndex(where: { $0.id == id }) else { return }
+        functionMappings[index].isEnabled = enabled
+        settingsDidChange()
+    }
+
     func clearActivity() {
         activity.removeAll(keepingCapacity: true)
     }
@@ -163,18 +286,51 @@ final class AppModel: ObservableObject {
 
     private func configureTransport() {
         transport.configure(enabledSourceIDs: enabledSourceIDs, rules: rules,
-                            defaultOutputChannel: defaultOutputChannel, isPaused: isPaused)
+                            defaultOutputChannel: defaultOutputChannel, isPaused: isPaused,
+                            functions: functions, functionMappings: functionMappings)
     }
 
     private func settingsDidChange() {
         guard !isLoading else { return }
         configureTransport()
         let settings = Settings(enabledSourceIDs: enabledSourceIDs, defaultOutputChannel: defaultOutputChannel,
-                                isPaused: isPaused, rules: rules)
+                                isPaused: isPaused, rules: rules, functionMappings: functionMappings)
         do {
             defaults.set(try JSONEncoder().encode(settings), forKey: settingsKey)
         } catch {
             recordError(MIDITransportError(code: "MIDI-202", message: "Could not save routing changes."))
+        }
+    }
+
+    private func loadLibrary() {
+        guard let data = defaults.data(forKey: libraryKey) else {
+            // Save the starter library right away so its IDs stay stable for loaded mappings.
+            functions = MIDIOutputFunction.starterLibrary
+            persistLibrary()
+            return
+        }
+        do {
+            functions = try JSONDecoder().decode([MIDIOutputFunction].self, from: data)
+        } catch {
+            // Keep the unreadable library so a later save can't destroy it.
+            defaults.set(data, forKey: "\(libraryKey).unreadable")
+            functions = MIDIOutputFunction.starterLibrary
+            persistLibrary()
+            recordError(MIDITransportError(code: "MIDI-203", message: "Could not read the function library. Loaded the starter library."))
+        }
+    }
+
+    private func libraryDidChange() {
+        guard !isLoading else { return }
+        configureTransport()
+        persistLibrary()
+    }
+
+    private func persistLibrary() {
+        do {
+            defaults.set(try JSONEncoder().encode(functions), forKey: libraryKey)
+        } catch {
+            recordError(MIDITransportError(code: "MIDI-204", message: "Could not save function library changes."))
         }
     }
 
@@ -193,5 +349,7 @@ final class AppModel: ObservableObject {
         var defaultOutputChannel: Int?
         var isPaused: Bool
         var rules: [MIDIRule]
+        /// Optional so settings saved before functions existed still decode.
+        var functionMappings: [MIDIFunctionMapping]?
     }
 }

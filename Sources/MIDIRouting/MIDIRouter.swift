@@ -96,6 +96,12 @@ public struct MIDIRouter: Sendable {
         return output
     }
 
+    /// Whether a note release would finish a press this router already sent.
+    public func isHoldingNote(_ message: MIDIMessage, from deviceID: String) -> Bool {
+        guard message.type == .note, let number = message.number else { return false }
+        return activeNotes[NoteKey(deviceID: deviceID, group: message.group, channel: message.channel, number: number)] != nil
+    }
+
     /// Generates note-offs for sounding notes and discards their stored assignments.
     public mutating func releaseNotes(from deviceID: String? = nil) -> [MIDIMessage] {
         let keys = activeNotes.keys.filter { deviceID == nil || $0.deviceID == deviceID }
