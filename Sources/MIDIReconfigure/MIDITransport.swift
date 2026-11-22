@@ -7,6 +7,11 @@ struct MIDIInputSource: Equatable, Identifiable {
     let name: String
 }
 
+struct MIDIOutputDestination: Equatable, Identifiable {
+    let id: String
+    let name: String
+}
+
 struct MIDITransportError: Error, Identifiable {
     let id = UUID()
     let code: String
@@ -78,6 +83,7 @@ final class MIDITransport: @unchecked Sendable {
     private let queue = DispatchQueue(label: "MIDIReconfigure.transport", qos: .userInteractive)
     private let defaults: UserDefaults
     private let onSources: ([MIDIInputSource]) -> Void
+    private let onDestinations: ([MIDIOutputDestination]) -> Void
     private let onActivity: ([MIDIActivity]) -> Void
     private let onStatus: (Bool) -> Void
     private let onError: (MIDITransportError) -> Void
@@ -90,6 +96,10 @@ final class MIDITransport: @unchecked Sendable {
     private var client: MIDIClientRef = 0
     private var inputPort: MIDIPortRef = 0
     private var output: MIDIEndpointRef = 0
+    private var outputPort: MIDIPortRef = 0
+    private var destinations: [MIDIOutputDestination] = []
+    private var destinationEndpoints: [String: MIDIEndpointRef] = [:]
+    private var functionEngine = MIDIFunctionEngine()
     private var sourceTimer: DispatchSourceTimer?
     private var router = MIDIRouter()
     private var enabledSourceIDs: Set<String> = []
@@ -105,12 +115,14 @@ final class MIDITransport: @unchecked Sendable {
     init(
         defaults: UserDefaults = .standard,
         onSources: @escaping ([MIDIInputSource]) -> Void,
+        onDestinations: @escaping ([MIDIOutputDestination]) -> Void,
         onActivity: @escaping ([MIDIActivity]) -> Void,
         onStatus: @escaping (Bool) -> Void,
         onError: @escaping (MIDITransportError) -> Void
     ) {
         self.defaults = defaults
         self.onSources = onSources
+        self.onDestinations = onDestinations
         self.onActivity = onActivity
         self.onStatus = onStatus
         self.onError = onError
@@ -134,7 +146,10 @@ final class MIDITransport: @unchecked Sendable {
         }
     }
 
-    func configure(enabledSourceIDs: Set<String>, rules: [MIDIRule], defaultOutputChannel: Int?, isPaused: Bool) {
+    func configure(
+        enabledSourceIDs: Set<String>, rules: [MIDIRule], defaultOutputChannel: Int?, isPaused: Bool,
+        functions: [MIDIOutputFunction], functionMappings: [MIDIFunctionMapping]
+    ) {
         queue.async { [weak self] in
             guard let self else { return }
             if isPaused && !self.isPaused {
@@ -144,6 +159,8 @@ final class MIDITransport: @unchecked Sendable {
             self.enabledSourceIDs = enabledSourceIDs
             self.router.rules = rules
             self.router.defaultOutputChannel = defaultOutputChannel
+            self.functionEngine.functions = functions
+            self.functionEngine.mappings = functionMappings
             self.isPaused = isPaused
             if selectionChanged { self.updateSources() }
         }
@@ -152,6 +169,15 @@ final class MIDITransport: @unchecked Sendable {
     func armLearn(_ requestID: UUID, onLearn: @escaping (UUID, MIDILearnedInput) -> Void) {
         queue.async { [weak self] in
             self?.learnRequest = LearnRequest(id: requestID, onLearn: onLearn)
+        }
+    }
+
+    /// Sends a function's output once, for checking it from the library.
+    func sendTest(_ function: MIDIOutputFunction) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let source = MIDIInputSource(id: "function-test", name: "Function test")
+            self.send(MIDIFunctionEngine.testEmissions(for: function), from: source, time: Date())
         }
     }
 
@@ -224,6 +250,13 @@ final class MIDITransport: @unchecked Sendable {
             return
         }
 
+        let portStatus = MIDIOutputPortCreate(client, "MIDI Reconfigure Output" as CFString, &outputPort)
+        if portStatus != noErr {
+            // The virtual output still works; only hardware function destinations are unavailable.
+            outputPort = 0
+            report("MIDI-107", "Couldn’t create the hardware MIDI output port", status: portStatus)
+        }
+
         updateSources()
         // A source can disappear from CoreMIDI's graph without an object removal callback.
         let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -246,6 +279,11 @@ final class MIDITransport: @unchecked Sendable {
         connections.removeAll()
         disposePortsAndSource()
         publishSources([])
+        destinationEndpoints.removeAll()
+        if !destinations.isEmpty {
+            destinations = []
+            DispatchQueue.main.async { [onDestinations] in onDestinations([]) }
+        }
         publishStatus(false)
         lastError = nil
     }
@@ -255,8 +293,10 @@ final class MIDITransport: @unchecked Sendable {
         sourceTimer = nil
         if inputPort != 0 { MIDIPortDispose(inputPort) }
         if output != 0 { MIDIEndpointDispose(output) }
+        if outputPort != 0 { MIDIPortDispose(outputPort) }
         inputPort = 0
         output = 0
+        outputPort = 0
     }
 
     private func restoreOutputID() {
@@ -296,6 +336,7 @@ final class MIDITransport: @unchecked Sendable {
             return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
         }
         publishSources(inputs)
+        updateDestinations()
 
         let enabled = discovered.filter { enabledSourceIDs.contains($0.input.id) }
         let byEndpoint = Dictionary(uniqueKeysWithValues: enabled.map { ($0.endpoint, $0) })
@@ -321,6 +362,31 @@ final class MIDITransport: @unchecked Sendable {
         }
     }
 
+    private func updateDestinations() {
+        var seenEndpoints: Set<MIDIEndpointRef> = []
+        var endpoints: [String: MIDIEndpointRef] = [:]
+        let discovered = (0..<MIDIGetNumberOfDestinations()).compactMap { index -> MIDIOutputDestination? in
+            let endpoint = MIDIGetDestination(index)
+            guard endpoint != 0, seenEndpoints.insert(endpoint).inserted, !isOffline(endpoint) else { return nil }
+            var uniqueID: MIDIUniqueID = 0
+            let status = MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyUniqueID, &uniqueID)
+            let id = status == noErr && uniqueID != 0 ? String(uniqueID) : "\(sessionID):dest:\(endpoint)"
+            let name = stringProperty(endpoint, key: kMIDIPropertyDisplayName)
+                ?? stringProperty(endpoint, key: kMIDIPropertyName)
+                ?? "MIDI Output \(index + 1)"
+            endpoints[id] = endpoint
+            return MIDIOutputDestination(id: id, name: name)
+        }
+        destinationEndpoints = endpoints
+        let sorted = discovered.sorted {
+            let order = $0.name.localizedStandardCompare($1.name)
+            return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
+        }
+        guard sorted != destinations else { return }
+        destinations = sorted
+        DispatchQueue.main.async { [onDestinations] in onDestinations(sorted) }
+    }
+
     private func isOffline(_ endpoint: MIDIEndpointRef) -> Bool {
         var offline: Int32 = 0
         if MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyOffline, &offline) == noErr, offline != 0 {
@@ -343,6 +409,8 @@ final class MIDITransport: @unchecked Sendable {
         guard let source = connections[token]?.input else { return }
         for packet in packets {
             var packetRouter = router
+            var packetFunctions = functionEngine
+            var functionOutput: [MIDIFunctionEmission] = []
             var outputWords: [UInt32] = []
             var activity: [MIDIActivity] = []
             var index = 0
@@ -361,6 +429,19 @@ final class MIDITransport: @unchecked Sendable {
                 guard !isPaused else { continue }
 
                 if let message {
+                    // A note routed before its function was loaded still releases through the rules.
+                    let rulesOwnRelease = message.isNoteRelease
+                        && packetRouter.isHoldingNote(message, from: source.id)
+                        && !packetFunctions.isHoldingNote(message, from: source.id)
+                    if !rulesOwnRelease, let emissions = packetFunctions.handle(message, from: source.id) {
+                        // Function triggers are consumed here and never reach the routing rules.
+                        for emission in emissions where emission.destinationID == nil {
+                            outputWords.append(emission.message.word)
+                            activity.append(functionRow(for: emission, from: source, time: received))
+                        }
+                        functionOutput += emissions.filter { $0.destinationID != nil }
+                        continue
+                    }
                     guard let routed = packetRouter.route(message, from: source.id) else { continue }
                     outputWords.append(routed.word)
                     activity.append(activityRow(
@@ -377,10 +458,13 @@ final class MIDITransport: @unchecked Sendable {
             // Each incoming event packet gets a separate output list to preserve SysEx packet boundaries.
             if outputWords.isEmpty || transmit(outputWords, timestamp: packet.timestamp) {
                 router = packetRouter
+                functionEngine = packetFunctions
             } else {
                 activity.removeAll { $0.direction == .outgoing }
+                functionOutput.removeAll()
             }
             record(activity)
+            if !functionOutput.isEmpty { send(functionOutput, from: source, time: received) }
         }
     }
 
@@ -405,8 +489,58 @@ final class MIDITransport: @unchecked Sendable {
     // UMP size is defined by the leading message-type nibble, including reserved types.
     private static let umpWordCounts = [1, 1, 1, 2, 2, 4, 1, 1, 2, 2, 2, 3, 3, 4, 4, 4]
 
-    private func transmit(_ words: [UInt32], timestamp: MIDITimeStamp) -> Bool {
-        guard output != 0, !words.isEmpty else { return false }
+    /// Sends function output, grouping hardware messages by destination. Returns false if any send failed.
+    @discardableResult
+    private func send(_ emissions: [MIDIFunctionEmission], from source: MIDIInputSource, time: Date) -> Bool {
+        var succeeded = true
+        var order: [String?] = []
+        var grouped: [String?: [MIDIFunctionEmission]] = [:]
+        for emission in emissions {
+            if grouped[emission.destinationID] == nil { order.append(emission.destinationID) }
+            grouped[emission.destinationID, default: []].append(emission)
+        }
+        for destinationID in order {
+            let batch = grouped[destinationID] ?? []
+            let words = batch.map(\.message.word)
+            let sent: Bool
+            if let destinationID {
+                guard let endpoint = destinationEndpoints[destinationID] else {
+                    let name = batch.first?.functionName ?? "A function"
+                    report("MIDI-108", "\(name)’s destination is offline. Reconnect it or choose another destination")
+                    succeeded = false
+                    continue
+                }
+                sent = transmit(words, timestamp: 0, to: endpoint)
+            } else {
+                sent = transmit(words, timestamp: 0)
+            }
+            if sent {
+                record(batch.map { functionRow(for: $0, from: source, time: time) })
+            } else {
+                succeeded = false
+            }
+        }
+        return succeeded
+    }
+
+    private func functionRow(for emission: MIDIFunctionEmission, from source: MIDIInputSource, time: Date) -> MIDIActivity {
+        let row = activityRow(for: emission.message, words: [], from: source, direction: .outgoing, time: time)
+        let destination = emission.destinationID.map { id in
+            destinations.first(where: { $0.id == id })?.name ?? "Offline destination"
+        } ?? Self.outputName
+        return MIDIActivity(
+            timestamp: row.timestamp, direction: .outgoing, deviceID: row.deviceID, deviceName: row.deviceName,
+            type: row.type, channel: row.channel, detail: "\(row.detail) · \(emission.functionName) → \(destination)"
+        )
+    }
+
+    private func transmit(_ words: [UInt32], timestamp: MIDITimeStamp, to destination: MIDIEndpointRef? = nil) -> Bool {
+        guard !words.isEmpty else { return false }
+        if destination == nil, output == 0 { return false }
+        if destination != nil, outputPort == 0 {
+            report("MIDI-107", "The hardware MIDI output port isn’t available. Try Restart MIDI")
+            return false
+        }
         let list = eventListStorage
         let firstPacket = MIDIEventListInit(list, ._1_0)
         let time = timestamp == 0 ? mach_absolute_time() : timestamp
@@ -417,6 +551,13 @@ final class MIDITransport: @unchecked Sendable {
         guard list.pointee.numPackets != 0 else {
             report("MIDI-105", "The outgoing MIDI packet exceeded CoreMIDI’s size limit")
             return false
+        }
+        if let destination {
+            let status = MIDISendEventList(outputPort, destination, list)
+            if status != noErr {
+                report("MIDI-109", "Couldn’t send MIDI to a hardware destination", status: status)
+            }
+            return status == noErr
         }
         let status = MIDIReceivedEventList(output, list)
         if status != noErr {
@@ -439,6 +580,8 @@ final class MIDITransport: @unchecked Sendable {
             guard transmit(batch.map(\.word), timestamp: 0) else { continue }
             record(batch.map { activityRow(for: $0, words: [], from: source, direction: .outgoing, time: time) })
         }
+        let functionReleases = functionEngine.releaseNotes(from: source.id)
+        if !functionReleases.isEmpty { send(functionReleases, from: source, time: time) }
     }
 
     private func activityRow(

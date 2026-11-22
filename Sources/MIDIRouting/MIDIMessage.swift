@@ -110,6 +110,29 @@ public struct MIDIMessage: Equatable, Sendable {
         return MIDIMessage(word: result, status: status)
     }
 
+    private static func channelVoice(_ status: Status, group: UInt32, channel: Int, data1: Int, data2: Int) -> MIDIMessage {
+        let channelBits = UInt32(min(max(channel, 1), 16) - 1)
+        let word = 0x2000_0000 | ((group & 0xF) << 24) | (status.rawValue << 20) | (channelBits << 16)
+            | (UInt32(min(max(data1, 0), 127)) << 8) | UInt32(min(max(data2, 0), 127))
+        return MIDIMessage(word: word, status: status)
+    }
+
+    public static func noteOn(channel: Int, number: Int, velocity: Int, group: UInt32 = 0) -> MIDIMessage {
+        channelVoice(.noteOn, group: group, channel: channel, data1: number, data2: max(velocity, 1))
+    }
+
+    public static func noteOff(channel: Int, number: Int, group: UInt32 = 0) -> MIDIMessage {
+        channelVoice(.noteOff, group: group, channel: channel, data1: number, data2: 0)
+    }
+
+    public static func controlChange(channel: Int, number: Int, value: Int, group: UInt32 = 0) -> MIDIMessage {
+        channelVoice(.controlChange, group: group, channel: channel, data1: number, data2: value)
+    }
+
+    public static func programChange(channel: Int, program: Int, group: UInt32 = 0) -> MIDIMessage {
+        channelVoice(.programChange, group: group, channel: channel, data1: program, data2: 0)
+    }
+
     func noteOff() -> MIDIMessage {
         let result = (word & 0xFF0F_FF00) | (Status.noteOff.rawValue << 20)
         return MIDIMessage(word: result, status: .noteOff)
