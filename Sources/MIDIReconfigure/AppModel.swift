@@ -23,7 +23,13 @@ final class AppModel: ObservableObject {
         ("RULE-001", "A rule’s input or output number must be a whole number from 0 to 127."),
         ("FUNC-001", "A function’s number must be 0–127, its value 0–127 (velocity 1–127), and its channel 1–16."),
         ("FUNC-002", "A function mapping’s input number must be a whole number from 0 to 127."),
-        ("FUNC-003", "A loaded function is no longer in the library. Remove it from Routing or load it again from the library.")
+        ("FUNC-003", "A loaded function is no longer in the library. Remove it from Routing or load it again from the library."),
+        ("UPD-001", "Updates couldn’t be checked. Check your internet connection, then click Check for Updates in Settings."),
+        ("UPD-002", "No published release was found. Download releases from the project’s GitHub Releases page."),
+        ("UPD-003", "The update couldn’t be downloaded or unpacked. Try again, or download it from GitHub Releases."),
+        ("UPD-004", "The update couldn’t be installed. Move MIDI Reconfigure.app to a folder you can edit, such as Applications, and try again."),
+        ("UPD-005", "Updates install only into a packaged MIDI Reconfigure.app. Build the app with scripts/build-app.sh."),
+        ("APP-001", "The Dock icon and menu bar icon can’t both be hidden. One stays on so you can reach the app.")
     ]
 
     static var buildDescription: String {
@@ -45,6 +51,38 @@ final class AppModel: ObservableObject {
     @Published private(set) var outputReady = false
     @Published private var learningRequestID: UUID?
     @Published var isMonitorPaused = false
+    @Published private(set) var visibilityNotice: String?
+
+    /// Shows the app in the Dock with a main menu. At least one of Dock or menu bar stays on.
+    @Published var showInDock: Bool {
+        didSet {
+            guard oldValue != showInDock else { return }
+            defaults.set(showInDock, forKey: Self.showInDockKey)
+            if !showInDock && !showInMenuBar {
+                showInMenuBar = true
+                visibilityNotice = "APP-001"
+            } else {
+                visibilityNotice = nil
+            }
+        }
+    }
+
+    @Published var showInMenuBar: Bool {
+        didSet {
+            guard oldValue != showInMenuBar else { return }
+            defaults.set(showInMenuBar, forKey: Self.showInMenuBarKey)
+            if !showInMenuBar && !showInDock {
+                showInDock = true
+                visibilityNotice = "APP-001"
+            } else {
+                visibilityNotice = nil
+            }
+        }
+    }
+
+    let updater: Updater
+    private static let showInDockKey = "show-in-dock"
+    private static let showInMenuBarKey = "show-in-menu-bar"
     @Published var workspaceSection: WorkspaceSection = .routing
 
     @Published var defaultOutputChannel: Int? {
@@ -78,7 +116,15 @@ final class AppModel: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        defaults.register(defaults: [Self.showInDockKey: true, Self.showInMenuBarKey: true])
+        let dock = defaults.bool(forKey: Self.showInDockKey)
+        showInDock = dock
+        showInMenuBar = dock ? defaults.bool(forKey: Self.showInMenuBarKey) : true
+        updater = Updater(defaults: defaults)
         defer { isLoading = false }
+        updater.onError = { [weak self] code, message in
+            self?.recordError(MIDITransportError(code: code, message: message))
+        }
         loadLibrary()
         guard let data = defaults.data(forKey: settingsKey) else { return }
         do {

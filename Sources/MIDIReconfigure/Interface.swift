@@ -6,6 +6,7 @@ enum WorkspaceSection: String, CaseIterable {
     case routing = "Routing"
     case functions = "Functions"
     case activity = "Activity"
+    case settings = "Settings"
     case errors = "Errors"
 
     var icon: String {
@@ -13,6 +14,7 @@ enum WorkspaceSection: String, CaseIterable {
         case .routing: "arrow.triangle.branch"
         case .functions: "bolt.circle"
         case .activity: "waveform"
+        case .settings: "gearshape"
         case .errors: "exclamationmark.circle"
         }
     }
@@ -27,7 +29,14 @@ let brandTint = Color(nsColor: NSColor(name: nil) { appearance in
 
 struct MenuBarPanel: View {
     @ObservedObject var model: AppModel
+    @ObservedObject private var updater: Updater
     let openWorkspace: (WorkspaceSection) -> Void
+
+    init(model: AppModel, openWorkspace: @escaping (WorkspaceSection) -> Void) {
+        self.model = model
+        self.updater = model.updater
+        self.openWorkspace = openWorkspace
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -75,22 +84,40 @@ struct MenuBarPanel: View {
 
             Divider()
 
+            if let release = updater.availableRelease {
+                Button {
+                    openWorkspace(.settings)
+                } label: {
+                    Label("Version \(release.version.description) is available", systemImage: "arrow.down.circle")
+                        .font(.caption.weight(.medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(brandTint)
+            }
+
             HStack(spacing: 8) {
                 Button {
                     openWorkspace(.routing)
                 } label: {
-                    Label("Routing", systemImage: WorkspaceSection.routing.icon)
+                    Label("Open main window", systemImage: "macwindow")
                 }
                 .buttonStyle(.borderedProminent)
                 Button {
-                    openWorkspace(.activity)
+                    openWorkspace(.settings)
                 } label: {
-                    Label("Activity", systemImage: WorkspaceSection.activity.icon)
+                    Image(systemName: WorkspaceSection.settings.icon)
+                        .accessibilityLabel("Settings")
                 }
+                .help("Settings")
                 Spacer(minLength: 0)
                 Menu {
                     Button("Function library…") { openWorkspace(.functions) }
+                    Button("Activity…") { openWorkspace(.activity) }
                     Button("Errors…") { openWorkspace(.errors) }
+                    Button("Check for Updates…") {
+                        openWorkspace(.settings)
+                        model.updater.check()
+                    }
                     Divider()
                     Button("Quit MIDI Reconfigure") { NSApp.terminate(nil) }
                         .keyboardShortcut("q")
@@ -129,47 +156,97 @@ struct MenuBarPanel: View {
 
 struct WorkspaceView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var updater: Updater
     @Binding var selection: WorkspaceSection
 
-    var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
+    init(model: AppModel, selection: Binding<WorkspaceSection>) {
+        self.model = model
+        self.updater = model.updater
+        _selection = selection
+    }
 
-            switch selection {
-            case .routing: RoutingView(model: model)
-            case .functions: FunctionsView(model: model)
-            case .activity: ActivityView(model: model)
-            case .errors: ErrorsView(model: model)
+    var body: some View {
+        NavigationSplitView {
+            sidebar
+                .navigationSplitViewColumnWidth(min: 180, ideal: 196, max: 240)
+        } detail: {
+            Group {
+                switch selection {
+                case .routing: RoutingView(model: model)
+                case .functions: FunctionsView(model: model)
+                case .activity: ActivityView(model: model)
+                case .settings: SettingsView(model: model)
+                case .errors: ErrorsView(model: model)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .windowBackgroundColor))
         }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .frame(minWidth: 760, idealWidth: 850, minHeight: 450, idealHeight: 570)
+        .frame(minWidth: 920, idealWidth: 1080, minHeight: 540, idealHeight: 680)
         .tint(brandTint)
     }
 
-    private var header: some View {
-        HStack(spacing: 13) {
-            AppMark(size: 35)
-            Text("MIDI Reconfigure")
-                .font(.system(size: 15, weight: .semibold))
-                .fixedSize()
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                AppMark(size: 30)
+                Text("MIDI Reconfigure")
+                    .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 8)
+            .padding(.bottom, 10)
 
-            Spacer(minLength: 12)
-            Picker("Workspace", selection: $selection) {
+            List(selection: Binding<WorkspaceSection?>(
+                get: { selection },
+                set: { if let section = $0 { selection = section } }
+            )) {
                 ForEach(WorkspaceSection.allCases, id: \.self) { section in
-                    Text(section.rawValue).tag(section)
+                    Label {
+                        HStack {
+                            Text(section.rawValue)
+                            Spacer(minLength: 4)
+                            badge(for: section)
+                        }
+                    } icon: {
+                        Image(systemName: section.icon)
+                    }
+                    .tag(section)
                 }
             }
-            .labelsHidden()
-            .pickerStyle(.segmented)
-            .frame(width: 344)
+            .listStyle(.sidebar)
 
-            Spacer(minLength: 12)
-            OutputStatus(model: model)
+            Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                OutputStatus(model: model)
+                Text(AppModel.buildDescription)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .help(AppModel.buildDescription)
+            }
+            .padding(14)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 13)
+    }
+
+    @ViewBuilder
+    private func badge(for section: WorkspaceSection) -> some View {
+        switch section {
+        case .settings where updater.availableRelease != nil:
+            Text("Update")
+                .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .foregroundStyle(.white)
+                .background(brandTint, in: Capsule())
+        case .errors where !model.errors.isEmpty:
+            Text("\(model.errors.count)")
+                .font(.caption2.weight(.semibold).monospacedDigit())
+                .foregroundStyle(.orange)
+        default:
+            EmptyView()
+        }
     }
 }
 
@@ -192,7 +269,7 @@ private struct AppMark: View {
     }
 }
 
-private struct OutputStatus: View {
+struct OutputStatus: View {
     @ObservedObject var model: AppModel
 
     var body: some View {

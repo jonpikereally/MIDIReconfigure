@@ -1,10 +1,29 @@
 # MIDI Reconfigure
 
-MIDI Reconfigure is a macOS menu bar utility that remaps incoming MIDI and publishes the result as a virtual input for your DAW. It uses CoreMIDI and runs locally on macOS 14 Sonoma or later.
+MIDI Reconfigure is a macOS app that remaps incoming MIDI and publishes the result as a virtual input for your DAW. It uses CoreMIDI and runs locally on macOS 14 Sonoma or later.
+
+## The main window
+
+The main window holds everything: **Routing**, **Functions**, **Activity**, **Settings**, and **Errors** in the sidebar. It opens at launch when the app is shown in the Dock. You can also open it from the menu bar icon, from **Window › Main Window** (⌘0), or by clicking the Dock icon. ⌘1–⌘5 switch sections, and ⌘, opens Settings.
+
+In **Settings › App**, choose **Show in Dock**, **Show in menu bar**, or both. One of them always stays on, so the app can't become unreachable.
+
+## Updates
+
+MIDI Reconfigure checks this repository's GitHub Releases at launch and every few hours. **Settings › Updates** shows the installed version and build, the latest release notes, and a **Check for Updates** button. **Install … and Relaunch** downloads the new app, checks its signature, replaces the installed copy, and reopens it.
+
+Turn on **Install updates automatically** to install a new version when the app launches. Updates never install while the app is already running, so a set is never interrupted. Keep the app in a folder you can write to, such as Applications.
+
+To publish a release, push a version tag. The Release workflow tests the code, builds a universal app, and attaches `MIDI-Reconfigure.zip` to a new GitHub release:
+
+```sh
+git tag v1.3.0
+git push origin v1.3.0
+```
 
 ## Route MIDI to your DAW
 
-1. Open **MIDI Reconfigure.app** and click its menu bar icon.
+1. Open **MIDI Reconfigure.app**.
 2. Open **Routing** and enable the input ports you want to route. Each enabled input passes through by default.
 3. Set a **Default output channel** or add a rule. Rules run from top to bottom and the first enabled match applies. A rule can match an input port, channel, message type, and where applicable, the note, CC, or program number.
 4. Select **MIDI Reconfigure** as a MIDI input in your DAW. Select that input on your track if your DAW also listens to the original device.
@@ -69,6 +88,12 @@ The starter functions (AbleSet Play, Stop, Next Song, Previous Song, and Quad Co
 | `FUNC-001` | A function needs a name, a number from 0–127, a value from 0–127 (velocity 1–127), and a channel from 1–16. |
 | `FUNC-002` | A function mapping’s input number must be a whole number from 0 to 127, or empty for any. |
 | `FUNC-003` | A loaded function is no longer in the library. Remove it from Routing, or load it again. |
+| `UPD-001` | Updates couldn't be checked. Check your internet connection and try **Check for Updates** again. |
+| `UPD-002` | No published release was found. See the GitHub Releases page. |
+| `UPD-003` | The update couldn't be downloaded or unpacked. Try again, or download it from GitHub Releases. |
+| `UPD-004` | The update couldn't be installed. Move the app to a folder you can edit, such as Applications. |
+| `UPD-005` | Updates install only into a packaged app built with `scripts/build-app.sh`. |
+| `APP-001` | The Dock icon and menu bar icon can't both be hidden. |
 
 ## Build from source
 
