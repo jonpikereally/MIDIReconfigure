@@ -9,7 +9,9 @@ let package = Package(
     ],
     targets: [
         .target(name: "MIDIRouting"),
-        .executableTarget(name: "MIDIReconfigure", dependencies: ["MIDIRouting"]),
-        .testTarget(name: "MIDIRoutingTests", dependencies: ["MIDIRouting"])
+        .target(name: "AppSupport"),
+        .executableTarget(name: "MIDIReconfigure", dependencies: ["MIDIRouting", "AppSupport"]),
+        .testTarget(name: "MIDIRoutingTests", dependencies: ["MIDIRouting"]),
+        .testTarget(name: "AppSupportTests", dependencies: ["AppSupport"])
     ]
 )

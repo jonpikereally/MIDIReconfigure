@@ -41,6 +41,10 @@ iconutil --convert icns "$iconset" --output "$app/Contents/Resources/AppIcon.icn
 cp Packaging/Info.plist "$info"
 plutil -replace CFBundleVersion -string "$build_number" "$info"
 plutil -replace MRCBuildDate -string "$build_date" "$info"
+if [[ -n "${MIDI_VERSION:-}" ]]; then
+    # Release builds take their version from the tag, e.g. v1.3.0.
+    plutil -replace CFBundleShortVersionString -string "${MIDI_VERSION#v}" "$info"
+fi
 install -m 755 "$binary_dir/MIDIReconfigure" "$app/Contents/MacOS/MIDIReconfigure"
 codesign --force --sign "${MIDI_SIGNING_IDENTITY:--}" --timestamp=none "$app"
 codesign --verify --strict "$app"
